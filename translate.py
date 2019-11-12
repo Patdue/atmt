@@ -38,6 +38,7 @@ def main(args):
     args_loaded.data = args.data
     args = args_loaded
     utils.init_logging(args)
+    args.cuda = False
 
     # Load dictionaries
     src_dict = Dictionary.load(os.path.join(args.data, 'dict.{:s}'.format(args.source_lang)))
