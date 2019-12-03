@@ -20,17 +20,22 @@ def get_args():
     parser.add_argument('--seed', default=42, type=int, help='pseudo random number generator seed')
 
     # Add data arguments
-    parser.add_argument('--data', default='indomain/prepared_data', help='path to data directory')
-    parser.add_argument('--checkpoint-path', default='checkpoints/checkpoint_best.pt', help='path to the model file')
+    parser.add_argument('--data', default='data_asg4/prepared_data', help='path to data directory')
+    parser.add_argument('--checkpoint-path', default='checkpoints_asg4/checkpoint_best.pt', help='path to the model file')
     parser.add_argument('--batch-size', default=None, type=int, help='maximum number of sentences in a batch')
     parser.add_argument('--output', default='model_translations.txt', type=str,
                         help='path to the output file destination')
     parser.add_argument('--max-len', default=25, type=int, help='maximum length of generated sequence')
 
     # Add beam search arguments
-    parser.add_argument('--beam-size', default=5, type=int, help='number of hypotheses expanded in beam search')
+    parser.add_argument('--beam-size', default=4, type=int, help='number of hypotheses expanded in beam search')
+    parser.add_argument('--length-norm-alpha', default=0.8, type=float, help="Length normalization alpha")
 
     return parser.parse_args()
+
+
+def normalize(Y, alpha):
+    return ((5 + Y) ** alpha) / (5 + 1) ** alpha
 
 
 def main(args):
@@ -86,8 +91,7 @@ def main(args):
             decoder_out, _ = model.decoder(go_slice, encoder_out)
 
             # __QUESTION 1: What happens here and what do 'log_probs' and 'next_candidates' contain?
-            log_probs, next_candidates = torch.topk(torch.log(torch.softmax(decoder_out, dim=2)),
-                                                    args.beam_size+1, dim=-1)
+            log_probs, next_candidates = torch.topk(torch.log(torch.softmax(decoder_out, dim=2)), args.beam_size+1, dim=-1)
 
         # Create number of beam_size beam search nodes for every input sentence
         for i in range(batch_size):
@@ -100,6 +104,7 @@ def main(args):
                 next_word = torch.where(best_candidate == tgt_dict.unk_idx, backoff_candidate, best_candidate)
                 log_p = torch.where(best_candidate == tgt_dict.unk_idx, backoff_log_p, best_log_p)
                 log_p = log_p[-1]
+                log_p = log_p / normalize(1, args.alpha)
 
                 # Store the encoder_out information for the current input sentence and beam
                 emb = encoder_out['src_embeddings'][:,i,:]
@@ -117,7 +122,7 @@ def main(args):
                 searches[i].add(-node.eval(), node)
 
         # Start generating further tokens until max sentence length reached
-        for _ in range(args.max_len-1):
+        for length in range(args.max_len-1):
 
             # Get the current nodes to expand
             nodes = [n[1] for s in searches for n in s.get_current_beams()]
@@ -155,6 +160,7 @@ def main(args):
                     next_word = torch.where(best_candidate == tgt_dict.unk_idx, backoff_candidate, best_candidate)
                     log_p = torch.where(best_candidate == tgt_dict.unk_idx, backoff_log_p, best_log_p)
                     log_p = log_p[-1]
+                    log_p = log_p / normalize(length + 1, args.alpha)
                     next_word = torch.cat((prev_words[i][1:], next_word[-1:]))
 
                     # Get parent node and beam search object for corresponding sentence
@@ -164,7 +170,7 @@ def main(args):
                     # __QUESTION 4: Why do we treat nodes that generated the end-of-sentence token differently?
 
                     # Store the node as final if EOS is generated
-                    if next_word[-1 ] == tgt_dict.eos_idx:
+                    if next_word[-1] == tgt_dict.eos_idx:
                         node = BeamSearchNode(search, node.emb, node.lstm_out, node.final_hidden,
                                               node.final_cell, node.mask, torch.cat((prev_words[i][0].view([1]),
                                               next_word)), node.logp, node.length)
@@ -203,7 +209,6 @@ def main(args):
 
         for ii, sent in enumerate(output_sentences):
             all_hyps[int(sample['id'].data[ii])] = sent
-
 
     # Write to file
     if args.output is not None:
