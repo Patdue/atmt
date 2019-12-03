@@ -31,6 +31,9 @@ def get_args():
     parser.add_argument('--beam-size', default=4, type=int, help='number of hypotheses expanded in beam search')
     parser.add_argument('--length-norm-alpha', default=0.8, type=float, help="Length normalization alpha")
 
+    parser.add_argument('--n-best', default=4, type=int, help='Output the n best sentences')
+    parser.add_argument('--gamma', default=1.0, type=float, help='Gamma for diverse beam search')
+
     return parser.parse_args()
 
 
@@ -75,6 +78,7 @@ def main(args):
 
     # Iterate over the test set
     all_hyps = {}
+    top_n_hyps = []
     for i, sample in enumerate(progress_bar):
 
         # Create a beam search object or every input sentence in batch
@@ -160,12 +164,16 @@ def main(args):
                     next_word = torch.where(best_candidate == tgt_dict.unk_idx, backoff_candidate, best_candidate)
                     log_p = torch.where(best_candidate == tgt_dict.unk_idx, backoff_log_p, best_log_p)
                     log_p = log_p[-1]
-                    log_p = log_p / normalize(length + 1, args.length_norm_alpha)
                     next_word = torch.cat((prev_words[i][1:], next_word[-1:]))
 
                     # Get parent node and beam search object for corresponding sentence
                     node = nodes[i]
                     search = node.search
+
+                    log_p = log_p / normalize(node.length, args.length_norm_alpha)
+
+                    rank = args.gamma * j
+                    log_p = log_p - rank
 
                     # __QUESTION 4: Why do we treat nodes that generated the end-of-sentence token differently?
 
@@ -189,7 +197,7 @@ def main(args):
                 search.prune()
 
         # Segment into sentences
-        best_sents = torch.stack([search.get_best()[1].sequence[1:] for search in searches])
+        best_sents = torch.stack([n[1].sequence[1:] for search in searches for n in search.get_n_best(args.n_best)])
         decoded_batch = best_sents.numpy()
 
         output_sentences = [decoded_batch[row, :] for row in range(decoded_batch.shape[0])]
@@ -207,14 +215,18 @@ def main(args):
         # Convert arrays of indices into strings of words
         output_sentences = [tgt_dict.string(sent) for sent in output_sentences]
 
-        for ii, sent in enumerate(output_sentences):
-            all_hyps[int(sample['id'].data[ii])] = sent
+        for sentence in output_sentences:
+            top_n_hyps.append(sentence)
 
-    # Write to file
+        all_hyps[int(sample['id'].data[0])] = output_sentences
+
+    # Write to files
     if args.output is not None:
-        with open(args.output, 'w') as out_file:
-            for sent_id in range(len(all_hyps.keys())):
-                out_file.write(all_hyps[sent_id] + '\n')
+        name, ext = os.path.splitext(args.output)
+        for n in range(args.n_best):
+            with open(name + str(n) + ext, 'w', encoding='utf-8') as out_file:
+                for sent_id in range(len(all_hyps.keys())):
+                    out_file.write(all_hyps[sent_id][n] + '\n')
 
 
 if __name__ == '__main__':
